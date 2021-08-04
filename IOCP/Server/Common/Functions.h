@@ -41,3 +41,23 @@ LPCTSTR GetSocketErrorDesc(EnSocketError enCode)
 	default: ASSERT(FALSE);			return _T("UNKNOWN ERROR");
 	}
 }
+
+VOID SysGetSystemInfo(LPSYSTEM_INFO pInfo)
+{
+	ASSERT(pInfo != nullptr);
+	::GetNativeSystemInfo(pInfo);
+}
+
+DWORD SysGetNumberOfProcessors()
+{
+	SYSTEM_INFO si;
+	SysGetSystemInfo(&si);
+
+	return si.dwNumberOfProcessors;
+}
+
+DWORD GetDefaultWorkerThreadCount()
+{
+	static const DWORD s_dwtc = Min((::SysGetNumberOfProcessors() * 2 + 2), MAX_WORKER_THREAD_COUNT);
+	return s_dwtc;
+}

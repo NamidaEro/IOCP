@@ -94,3 +94,61 @@ public:
 
 #define ENSURE_STOP()							{if(GetState() != SS_STOPPED) Stop();}
 #define ENSURE_HAS_STOPPED()					{if(GetState() != SS_STOPPED) return;}
+
+template<class T> class ISocketListenerT
+{
+public:
+	virtual EnHandleResult OnHandShake(T* pSender, ULONG_PTR dwConnID) = 0;
+	virtual EnHandleResult OnSend(T* pSender, ULONG_PTR dwConnID, const BYTE* pData, int iLength) = 0;
+	virtual EnHandleResult OnReceive(T* pSender, ULONG_PTR dwConnID, const BYTE* pData, int iLength) = 0;
+	virtual EnHandleResult OnReceive(T* pSender, ULONG_PTR dwConnID, int iLength) = 0;
+	virtual EnHandleResult OnClose(T* pSender, ULONG_PTR dwConnID, EnSocketOperation enOperation, int iErrorCode) = 0;
+
+public:
+	virtual ~ISocketListenerT() {}
+};
+
+template<class T> class IComplexSocketListenerT : public ISocketListenerT<T>
+{
+public:
+	virtual EnHandleResult OnShutdown(T* pSender) = 0;
+};
+
+template<class T> class IServerListenerT : public IComplexSocketListenerT<T>
+{
+public:
+	virtual EnHandleResult OnPrepareListen(T* pSender, SOCKET soListen) = 0;
+	virtual EnHandleResult OnAccept(T* pSender, ULONG_PTR dwConnID, UINT_PTR soClient) = 0;
+};
+
+class ITcpServerListener : public IServerListenerT<ITcpServer>
+{
+public:
+
+};
+
+class CInitSocket
+{
+public:
+	CInitSocket(LPWSADATA lpWSAData = nullptr, BYTE minorVersion = 2, BYTE majorVersion = 2)
+	{
+		LPWSADATA lpTemp = lpWSAData;
+
+		if (!lpTemp)
+			lpTemp = CreateLocalObject(WSADATA);
+
+		m_iResult = ::WSAStartup(MAKEWORD(majorVersion, minorVersion), lpTemp);
+	}
+
+	~CInitSocket()
+	{
+		if (IsValid())
+			::WSACleanup();
+	}
+
+	int	 GetResult() const { return m_iResult; }
+	BOOL IsValid()	 const { return m_iResult == 0; }
+
+private:
+	int m_iResult;
+};

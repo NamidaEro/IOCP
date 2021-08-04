@@ -5,6 +5,9 @@
 #include "Functions.h"
 #include "Singleton.h"
 
+#define DEFAULT_CONNECTION_COUNT				10000
+#define DEFAULT_WORKER_THREAD_COUNT				(GetDefaultWorkerThreadCount())
+
 template<class T> struct TSimpleList
 {
 public:
@@ -1039,5 +1042,605 @@ struct TSocketObj : public TSocketObjBase
 	}
 };
 
+int NoBlockReceiveNotCheck(TBufferObj* pBufferObj)
+{
+	int result = NO_ERROR;
+	DWORD dwFlag = 0;
+	DWORD dwBytes = 0;
+
+	if (::WSARecv(
+		pBufferObj->client,
+		&pBufferObj->buff,
+		1,
+		&dwBytes,
+		&dwFlag,
+		nullptr,
+		nullptr
+	) == SOCKET_ERROR)
+	{
+		result = ::WSAGetLastError();
+	}
+	else
+	{
+		if (dwBytes > 0)
+			pBufferObj->buff.len = dwBytes;
+		else
+			result = WSAEDISCON;
+	}
+
+	return result;
+}
+
+template<class T> BOOL ContinueReceive(T* pThis, TSocketObj* pSocketObj, TBufferObj* pBufferObj, EnHandleResult& hr)
+{
+	int rs = NO_ERROR;
+
+	for (int i = 0; i < MAX_IOCP_CONTINUE_RECEIVE || MAX_IOCP_CONTINUE_RECEIVE < 0; i++)
+	{
+		if (pSocketObj->paused)
+			break;
+
+		if (hr != HR_OK && hr != HR_IGNORE)
+			break;
+
+		pBufferObj->buff.len = pThis->GetSocketBufferSize();
+		rs = ::NoBlockReceiveNotCheck(pBufferObj);
+
+		if (rs != NO_ERROR)
+			break;
+
+		hr = pThis->TriggerFireReceive(pSocketObj, pBufferObj);
+	}
+
+	if (hr != HR_OK && hr != HR_IGNORE)
+		return FALSE;
+
+	if (rs != NO_ERROR && rs != WSAEWOULDBLOCK)
+	{
+		if (rs == WSAEDISCON)
+			pThis->AddFreeSocketObj(pSocketObj, SCF_CLOSE);
+		else
+			pThis->CheckError(pSocketObj, SO_RECEIVE, rs);
+
+		pThis->AddFreeBufferObj(pBufferObj);
+
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+class CEvt
+{
+public:
+	CEvt(BOOL bManualReset = FALSE, BOOL bInitialState = FALSE, LPCTSTR lpszName = nullptr, LPSECURITY_ATTRIBUTES pSecurity = nullptr)
+	{
+		m_hEvent = ::CreateEvent(pSecurity, bManualReset, bInitialState, lpszName);
+		ENSURE(IsValid());
+	}
+
+	~CEvt()
+	{
+		if (IsValid())
+			ENSURE(::CloseHandle(m_hEvent));
+	}
+
+	BOOL Open(DWORD dwAccess, BOOL bInheritHandle, LPCTSTR lpszName)
+	{
+		if (IsValid())
+			ENSURE(::CloseHandle(m_hEvent));
+
+		m_hEvent = ::OpenEvent(dwAccess, bInheritHandle, lpszName);
+		return(IsValid());
+	}
+
+	BOOL Wait(DWORD dwMilliseconds = INFINITE)
+	{
+		DWORD rs = ::WaitForSingleObject(m_hEvent, dwMilliseconds);
+
+		if (rs == WAIT_TIMEOUT) ::SetLastError(WAIT_TIMEOUT);
+
+		return (rs == WAIT_OBJECT_0);
+	}
+
+	BOOL Pulse() { return(::PulseEvent(m_hEvent)); }
+	BOOL Reset() { return(::ResetEvent(m_hEvent)); }
+	BOOL Set() { return(::SetEvent(m_hEvent)); }
+
+	BOOL IsValid() { return m_hEvent != nullptr; }
+
+	HANDLE GetHandle() { return m_hEvent; }
+	const HANDLE GetHandle()	const { return m_hEvent; }
+
+	operator HANDLE			() { return m_hEvent; }
+	operator const HANDLE()	const { return m_hEvent; }
+
+private:
+	CEvt(const CEvt&);
+	CEvt operator = (const CEvt&);
+
+private:
+	HANDLE m_hEvent;
+};
+
+class CTimerEvt
+{
+public:
+	CTimerEvt(BOOL bManualReset = FALSE, LPCTSTR lpszName = nullptr, LPSECURITY_ATTRIBUTES pSecurity = nullptr)
+	{
+		m_hTimer = ::CreateWaitableTimer(pSecurity, bManualReset, lpszName);
+		ENSURE(IsValid());
+	}
+
+	~CTimerEvt()
+	{
+		if (IsValid())
+			ENSURE(::CloseHandle(m_hTimer));
+	}
+
+	BOOL Open(DWORD dwAccess, BOOL bInheritHandle, LPCTSTR lpszName)
+	{
+		if (IsValid())
+			ENSURE(::CloseHandle(m_hTimer));
+
+		m_hTimer = ::OpenWaitableTimer(dwAccess, bInheritHandle, lpszName);
+		return(IsValid());
+	}
+
+	BOOL Set(LONG lPeriod, LARGE_INTEGER* lpDueTime = nullptr, BOOL bResume = FALSE, PTIMERAPCROUTINE pfnAPC = nullptr, LPVOID lpArg = nullptr)
+	{
+		if (lpDueTime == nullptr)
+		{
+			lpDueTime = (LARGE_INTEGER*)alloca(sizeof(LARGE_INTEGER));
+			lpDueTime->QuadPart = -(lPeriod * 10000LL);
+		}
+
+		return ::SetWaitableTimer(m_hTimer, lpDueTime, lPeriod, pfnAPC, lpArg, bResume);
+	}
 
 
+	BOOL Reset() { return(::CancelWaitableTimer(m_hTimer)); }
+	BOOL IsValid() { return m_hTimer != nullptr; }
+
+	HANDLE GetHandle() { return m_hTimer; }
+	const HANDLE GetHandle()	const { return m_hTimer; }
+
+	operator HANDLE			() { return m_hTimer; }
+	operator const HANDLE()	const { return m_hTimer; }
+
+private:
+	CTimerEvt(const CTimerEvt&);
+	CTimerEvt operator = (const CTimerEvt&);
+
+private:
+	HANDLE m_hTimer;
+};
+
+class CTimerQueue
+{
+public:
+	CTimerQueue()
+	{
+		Create();
+	}
+
+	~CTimerQueue()
+	{
+		Delete();
+	}
+
+	HANDLE CreateTimer(WAITORTIMERCALLBACK fnCallback, PVOID lpParam, DWORD dwPeriod, DWORD dwDueTime = INFINITE, ULONG ulFlags = WT_EXECUTEDEFAULT)
+	{
+		HANDLE hTimer = nullptr;
+
+		if (dwDueTime == INFINITE)
+			dwDueTime = dwPeriod;
+
+		::CreateTimerQueueTimer(&hTimer, m_hTimerQueue, fnCallback, lpParam, dwDueTime, dwPeriod, ulFlags);
+
+		return hTimer;
+	}
+
+	BOOL ChangeTimer(HANDLE hTimer, DWORD dwPeriod, DWORD dwDueTime = INFINITE)
+	{
+		if (dwDueTime == INFINITE)
+			dwDueTime = dwPeriod;
+
+		return ::ChangeTimerQueueTimer(m_hTimerQueue, hTimer, dwDueTime, dwPeriod);
+	}
+
+	BOOL DeleteTimer(HANDLE hTimer, HANDLE hCompletionEvent = INVALID_HANDLE_VALUE)
+	{
+		return ::DeleteTimerQueueTimer(m_hTimerQueue, hTimer, hCompletionEvent);
+	}
+
+	BOOL Reset()
+	{
+		Delete();
+		Create();
+
+		return IsValid();
+	}
+
+	BOOL IsValid() { return m_hTimerQueue != nullptr; }
+
+	HANDLE GetHandle() { return m_hTimerQueue; }
+	const HANDLE GetHandle()	const { return m_hTimerQueue; }
+
+	operator HANDLE			() { return m_hTimerQueue; }
+	operator const HANDLE()	const { return m_hTimerQueue; }
+
+private:
+	void Create()
+	{
+		m_hTimerQueue = ::CreateTimerQueue();
+		ENSURE(IsValid());
+	}
+
+	void Delete()
+	{
+		if (IsValid())
+		{
+			ENSURE(::DeleteTimerQueueEx(m_hTimerQueue, INVALID_HANDLE_VALUE));
+			m_hTimerQueue = nullptr;
+		}
+	}
+
+private:
+	CTimerQueue(const CTimerQueue&);
+	CTimerQueue operator = (const CTimerQueue&);
+
+private:
+	HANDLE m_hTimerQueue;
+};
+
+template <class T, class index_type = DWORD, bool adjust_index = false> class CRingCache2
+{
+public:
+
+	enum EnGetResult { GR_FAIL = -1, GR_INVALID = 0, GR_VALID = 1 };
+
+	typedef T* TPTR;
+	typedef volatile T* VTPTR;
+
+	typedef unordered_set<index_type>			IndexSet;
+	typedef typename IndexSet::const_iterator	IndexSetCI;
+	typedef typename IndexSet::iterator			IndexSetI;
+
+	static TPTR const E_EMPTY;
+	static TPTR const E_LOCKED;
+	static TPTR const E_MAX_STATUS;
+	static DWORD const MAX_SIZE;
+
+public:
+
+	static index_type& INDEX_INC(index_type& dwIndex) { if (adjust_index) ++dwIndex; return dwIndex; }
+	static index_type& INDEX_DEC(index_type& dwIndex) { if (adjust_index) --dwIndex; return dwIndex; }
+
+	index_type& INDEX_R2V(index_type& dwIndex) { dwIndex += *(m_px + dwIndex) * m_dwSize; return dwIndex; }
+
+	BOOL INDEX_V2R(index_type& dwIndex)
+	{
+		index_type m = dwIndex % m_dwSize;
+		BYTE x = *(m_px + m);
+
+		if (dwIndex / m_dwSize != x)
+			return FALSE;
+
+		dwIndex = m;
+		return TRUE;
+	}
+
+
+private:
+
+	VTPTR& INDEX_VAL(index_type dwIndex) { return *(m_pv + dwIndex); }
+
+public:
+
+	BOOL Put(TPTR pElement, index_type& dwIndex)
+	{
+		ASSERT(pElement != nullptr);
+
+		if (!IsValid()) return FALSE;
+
+		BOOL isOK = FALSE;
+
+		while (true)
+		{
+			if (!HasSpace())
+				break;
+
+			DWORD dwCurSeq = m_dwCurSeq;
+			index_type dwCurIndex = dwCurSeq % m_dwSize;
+			VTPTR& pValue = INDEX_VAL(dwCurIndex);
+
+			if (pValue == E_EMPTY)
+			{
+				if (::InterlockedCompareExchangePointer((volatile PVOID*)&pValue, pElement, E_EMPTY) == E_EMPTY)
+				{
+					::InterlockedIncrement(&m_dwCount);
+					::InterlockedCompareExchange(&m_dwCurSeq, dwCurSeq + 1, dwCurSeq);
+
+					dwIndex = INDEX_INC(INDEX_R2V(dwCurIndex));
+					isOK = TRUE;
+
+					if (pElement != E_LOCKED)
+						EmplaceIndex(dwIndex);
+
+					break;
+				}
+			}
+
+			::InterlockedCompareExchange(&m_dwCurSeq, dwCurSeq + 1, dwCurSeq);
+		}
+
+		return isOK;
+	}
+
+	EnGetResult Get(index_type dwIndex, TPTR* ppElement, index_type* pdwRealIndex = nullptr)
+	{
+		ASSERT(ppElement != nullptr);
+
+		if (!IsValid() || !INDEX_V2R(INDEX_DEC(dwIndex)))
+		{
+			*ppElement = nullptr;
+			return GR_FAIL;
+		}
+
+		*ppElement = (TPTR)INDEX_VAL(dwIndex);
+		if (pdwRealIndex) *pdwRealIndex = dwIndex;
+
+		return IsValidElement(*ppElement) ? GR_VALID : GR_INVALID;
+	}
+
+	BOOL Set(index_type dwIndex, TPTR pElement, TPTR* ppOldElement = nullptr, index_type* pdwRealIndex = nullptr)
+	{
+		TPTR pElement2 = nullptr;
+
+		if (pdwRealIndex == nullptr)
+			pdwRealIndex = CreateLocalObject(index_type);
+
+		if (Get(dwIndex, &pElement2, pdwRealIndex) == GR_FAIL)
+			return FALSE;
+
+		if (ppOldElement != nullptr)
+			*ppOldElement = pElement2;
+
+		if (pElement == pElement2)
+			return FALSE;
+
+		int f1 = 0;
+		int f2 = 0;
+
+		if (pElement == E_EMPTY)
+		{
+			if (pElement2 == E_LOCKED)
+				f1 = -1;
+			else
+				f1 = f2 = -1;
+		}
+		else if (pElement == E_LOCKED)
+		{
+			if (pElement2 == E_EMPTY)
+				f1 = 1;
+			else
+				f2 = -1;
+		}
+		else
+		{
+			if (pElement2 == E_EMPTY)
+				f1 = f2 = 1;
+			else if (pElement2 == E_LOCKED)
+				f2 = 1;
+		}
+
+		BOOL bSetValueFirst = (f1 + f2 >= 0);
+		index_type dwRealIndex = *pdwRealIndex;
+
+		if (bSetValueFirst)	INDEX_VAL(dwRealIndex) = pElement;
+		if (f1 > 0)			::InterlockedIncrement(&m_dwCount);
+		if (f2 != 0)			(f2 > 0) ? EmplaceIndex(dwIndex) : EraseIndex(dwIndex);
+		if (f1 < 0) { ::InterlockedDecrement(&m_dwCount); ++(*(m_px + dwRealIndex)); }
+		if (!bSetValueFirst) INDEX_VAL(dwRealIndex) = pElement;
+
+		ASSERT(Spaces() <= Size());
+
+		return TRUE;
+	}
+
+	BOOL Remove(index_type dwIndex, TPTR* ppElement = nullptr)
+	{
+		return Set(dwIndex, E_EMPTY, ppElement);
+	}
+
+	BOOL AcquireLock(index_type& dwIndex)
+	{
+		return Put(E_LOCKED, dwIndex);
+	}
+
+	BOOL ReleaseLock(index_type dwIndex, TPTR pElement)
+	{
+		ASSERT(pElement == nullptr || IsValidElement(pElement));
+
+		TPTR pElement2 = nullptr;
+		Get(dwIndex, &pElement2);
+
+		ASSERT(pElement2 == E_LOCKED);
+
+		if (pElement2 != E_LOCKED)
+			return FALSE;
+
+		return Set(dwIndex, pElement);
+	}
+
+public:
+
+	void Reset(DWORD dwSize = 0)
+	{
+		if (IsValid())
+			Destroy();
+		if (dwSize > 0)
+			Create(dwSize);
+	}
+
+	BOOL GetAllElementIndexes(index_type ids[], DWORD& dwCount, BOOL bCopy = TRUE)
+	{
+		if (ids == nullptr || dwCount == 0)
+		{
+			dwCount = Elements();
+			return FALSE;
+		}
+
+		IndexSet* pIndexes = nullptr;
+		IndexSet indexes;
+
+		if (bCopy)
+			pIndexes = &CopyIndexes(indexes);
+		else
+			pIndexes = &m_indexes;
+
+		BOOL isOK = FALSE;
+		DWORD dwSize = (DWORD)pIndexes->size();
+
+		if (dwSize > 0 && dwSize <= dwCount)
+		{
+			IndexSetCI it = pIndexes->begin();
+			IndexSetCI end = pIndexes->end();
+
+			for (int i = 0; it != end; ++it, ++i)
+				ids[i] = *it;
+
+			isOK = TRUE;
+		}
+
+		dwCount = dwSize;
+
+		return isOK;
+	}
+
+	unique_ptr<index_type[]> GetAllElementIndexes(DWORD& dwCount, BOOL bCopy = TRUE)
+	{
+		IndexSet* pIndexes = nullptr;
+		IndexSet indexes;
+
+		if (bCopy)
+			pIndexes = &CopyIndexes(indexes);
+		else
+			pIndexes = &m_indexes;
+
+		unique_ptr<index_type[]> ids;
+		dwCount = (DWORD)pIndexes->size();
+
+		if (dwCount > 0)
+		{
+			ids.reset(new index_type[dwCount]);
+
+			IndexSetCI it = pIndexes->begin();
+			IndexSetCI end = pIndexes->end();
+
+			for (int i = 0; it != end; ++it, ++i)
+				ids[i] = *it;
+		}
+
+		return ids;
+	}
+
+	static BOOL IsValidElement(TPTR pElement) { return pElement > E_MAX_STATUS; }
+
+	DWORD Size() { return m_dwSize; }
+	DWORD Elements() { return (DWORD)m_indexes.size(); }
+	DWORD Spaces() { return m_dwSize - m_dwCount; }
+	BOOL HasSpace() { return m_dwCount < m_dwSize; }
+	BOOL IsEmpty() { return m_dwCount == 0; }
+	BOOL IsValid() { return m_pv != nullptr; }
+
+private:
+
+	void Create(DWORD dwSize)
+	{
+		ASSERT(!IsValid() && dwSize > 0 && dwSize <= MAX_SIZE);
+
+		m_dwCurSeq = 0;
+		m_dwCount = 0;
+		m_dwSize = dwSize;
+		m_pv = (VTPTR*)malloc(m_dwSize * sizeof(TPTR));
+		m_px = (BYTE*)malloc(m_dwSize * sizeof(BYTE));
+
+		::ZeroMemory(m_pv, m_dwSize * sizeof(TPTR));
+		::ZeroMemory(m_px, m_dwSize * sizeof(BYTE));
+	}
+
+	void Destroy()
+	{
+		ASSERT(IsValid());
+
+		m_indexes.clear();
+		free((void*)m_pv);
+		free((void*)m_px);
+
+		m_pv = nullptr;
+		m_px = nullptr;
+		m_dwSize = 0;
+		m_dwCount = 0;
+		m_dwCurSeq = 0;
+	}
+
+	IndexSet& CopyIndexes(IndexSet& indexes)
+	{
+		{
+			CReadLock locallock(m_cs);
+			indexes = m_indexes;
+		}
+
+		return indexes;
+	}
+
+	void EmplaceIndex(index_type dwIndex)
+	{
+		CWriteLock locallock(m_cs);
+		m_indexes.emplace(dwIndex);
+	}
+
+	void EraseIndex(index_type dwIndex)
+	{
+		CWriteLock locallock(m_cs);
+		m_indexes.erase(dwIndex);
+	}
+
+public:
+	CRingCache2(DWORD dwSize = 0)
+		: m_pv(nullptr)
+		, m_px(nullptr)
+		, m_dwSize(0)
+		, m_dwCount(0)
+		, m_dwCurSeq(0)
+	{
+		Reset(dwSize);
+	}
+
+	~CRingCache2()
+	{
+		Reset(0);
+	}
+
+private:
+	CRingCache2(const CRingCache2&);
+	CRingCache2 operator = (const CRingCache2&);
+
+private:
+	DWORD				m_dwSize;
+	VTPTR* m_pv;
+	char				pack1[PACK_SIZE_OF(VTPTR*)];
+	BYTE* m_px;
+	char				pack2[PACK_SIZE_OF(BYTE*)];
+	volatile DWORD		m_dwCurSeq;
+	char				pack3[PACK_SIZE_OF(DWORD)];
+	volatile DWORD		m_dwCount;
+	char				pack4[PACK_SIZE_OF(DWORD)];
+
+	CSimpleRWLock		m_cs;
+	IndexSet			m_indexes;
+};
+
+typedef CRingCache2<TSocketObj, ULONG_PTR, true>		TSocketObjPtrPool;

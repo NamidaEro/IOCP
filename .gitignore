@@ -36,3 +36,12 @@
 *.opendb
 *.db
 *.db-*
+
+*.tlog
+*.ipch
+Browse.*.*
+*.log
+*.recipe
+*.idb
+*.pdb
+*.ilk

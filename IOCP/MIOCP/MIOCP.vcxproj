@@ -153,23 +153,28 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="BaseRefObject.h" />
+    <ClInclude Include="Classes\BaseRefObject.h" />
     <ClInclude Include="Common\Enums.h" />
+    <ClInclude Include="Common\Functions.h" />
     <ClInclude Include="Common\Macros.h" />
+    <ClInclude Include="Extern\ExternFunctions.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="pch.h" />
-    <ClInclude Include="Tiocp.h" />
+    <ClInclude Include="Classes\Tiocp.h" />
+    <ClInclude Include="Classes\UUID.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="BaseRefObject.cpp" />
+    <ClCompile Include="Classes\BaseRefObject.cpp" />
     <ClCompile Include="dllmain.cpp" />
+    <ClCompile Include="Extern\ExternFunctions.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="Tiocp.cpp" />
+    <ClCompile Include="Classes\Tiocp.cpp" />
+    <ClCompile Include="Classes\UUID.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

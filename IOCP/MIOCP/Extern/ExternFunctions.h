@@ -7,12 +7,6 @@
 #include "../Classes/BaseRefObject.h"
 #include "../Classes/Tiocp.h"
 
-SOCKET_API CBaseRefObject* CreateRefObject()
-{
-	return CBaseRefObject::Create();
-}
+SOCKET_API CBaseRefObject* CreateRefObject();
 
-SOCKET_API CTiocp* CreateIOCPObject()
-{
-	return (CTiocp*)CBaseRefObject::Create();
-}
+SOCKET_API CTiocp* CreateIOCPObject();

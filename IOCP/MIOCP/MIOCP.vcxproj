@@ -154,6 +154,9 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="Classes\BaseRefObject.h" />
+    <ClInclude Include="Classes\CObjectPool.h" />
+    <ClInclude Include="Classes\ClientInfo.h" />
+    <ClInclude Include="Common\Define.h" />
     <ClInclude Include="Common\Enums.h" />
     <ClInclude Include="Common\Functions.h" />
     <ClInclude Include="Common\Macros.h" />

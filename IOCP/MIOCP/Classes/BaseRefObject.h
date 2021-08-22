@@ -19,7 +19,7 @@ private:
 protected:
 	static std::map<const std::string, CBaseRefObject*> objects;
 
-private:
+protected:
 	CBaseRefObject();
 
 public:

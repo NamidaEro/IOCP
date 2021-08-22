@@ -42,6 +42,15 @@
     <ClInclude Include="Classes\UUID.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="Classes\CObjectPool.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Classes\ClientInfo.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="Common\Define.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
